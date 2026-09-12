@@ -10,22 +10,13 @@
 	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
 	"assets": {
 		"binding": "ASSETS",
-		"directory": "./public",
-		// Worker 先处理请求（否则静态资源层会先用 index.html 接管 "/"，伪装页与 /admin 都会失效）
-		"run_worker_first": true
+		"directory": "./public"
 	},
 	"observability": {
 		"enabled": true
 	},
 	"ai": {
 		"binding": "AI"
-	},
-	"vars": {
-		// /api/judge 的默认后端（路径 /cfai、/gemini 会强制覆盖它）
-		"JUDGE_PROVIDER": "workers-ai",
-		// /gemini 路由用；2.5 系列默认开思考会吃掉输出预算，故关闭
-		"GEMINI_MODEL": "gemini-2.5-flash",
-		"GEMINI_THINKING_BUDGET": "0"
 	},
 	"upload_source_maps": true
 }
