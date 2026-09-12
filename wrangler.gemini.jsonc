@@ -27,7 +27,8 @@
 	"upload_source_maps": true,
 	"vars": {
 		"JUDGE_PROVIDER": "gemini",
-		// GEMINI_MODEL 部署前填上具体模型 ID（非密钥，明文即可）
-		"GEMINI_MODEL": ""
+		"GEMINI_MODEL": "gemini-2.5-flash",
+		// 2.5 系列默认开启思考，会吃掉输出预算并拖慢响应；审核只需一次判断，关闭思考
+		"GEMINI_THINKING_BUDGET": "0"
 	}
 }
