@@ -14,8 +14,14 @@ export interface Env {
 	ASSETS: { fetch: (request: Request) => Promise<Response> };
 
 	/**
-	 * Site access password. Set via wrangler secret put SITE_PASSWORD.
-	 * Falls back to "Jihao0318" if not set.
+	 * API key required by /api/judge (x-judge-key header).
+	 * MUST be set via `wrangler secret put JUDGE_KEY` — no fallback.
+	 */
+	JUDGE_KEY: string;
+
+	/**
+	 * Site access password (verify-site endpoint).
+	 * Set via wrangler secret put SITE_PASSWORD — no fallback.
 	 */
 	SITE_PASSWORD?: string;
 }

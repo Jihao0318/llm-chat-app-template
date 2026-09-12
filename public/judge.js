@@ -44,13 +44,18 @@ async function judgeText() {
       return;
     }
 
+    // 首行作标题，其余作正文（与 CloudForum 后端 server-to-server 协议一致：{title, content}）
+    const lines = text.split("\n");
+    const title = lines[0] || "";
+    const content = lines.slice(1).join("\n").trim();
+
     const response = await fetch("/api/judge", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-judge-key": key,
       },
-      body: JSON.stringify({ content: text }),
+      body: JSON.stringify({ title, content }),
     });
 
     if (response.status === 401) {
@@ -67,25 +72,18 @@ async function judgeText() {
     judgeResult.classList.remove("hidden");
     judgeLoading.classList.add("hidden");
 
-    if (data.status === "pass") {
+    if (data.verdict === "pass") {
       judgeBadgePass.classList.remove("hidden");
       judgeBadgeReject.classList.add("hidden");
-      judgeOutput.textContent = "✅ 内容合规，审核通过";
+      judgeOutput.textContent = `✅ 内容合规，审核通过（置信度 ${data.confidence ?? "—"}）`;
       judgeOutput.className = "text-green-700 font-medium";
-    } else if (data.status === "reject") {
+    } else if (data.verdict === "flag") {
       judgeBadgePass.classList.add("hidden");
       judgeBadgeReject.classList.remove("hidden");
-      // 优先展示 violations 数组（多条），兼容旧格式单条
-      let detail = '';
-      if (Array.isArray(data.violations) && data.violations.length > 0) {
-        detail = data.violations.map((v: any) =>
-          `${v.reason}（${v.violation_phrase}）`
-        ).join('；');
-      } else if (data.reason) {
-        const phrase = data.violation_phrase ? `（${data.violation_phrase}）` : '';
-        detail = `${data.reason} ${phrase}`;
-      }
-      judgeOutput.textContent = `❌ 内容违规：${detail || "未指定原因"}`;
+      const reasons = Array.isArray(data.reasons) && data.reasons.length > 0
+        ? data.reasons.join("、")
+        : "未指定类别";
+      judgeOutput.textContent = `❌ 内容违规：${reasons}（置信度 ${data.confidence ?? "—"}）${data.summary ? "：" + data.summary : ""}`;
       judgeOutput.className = "text-red-700 font-medium";
     } else {
       judgeOutput.textContent = "⚠️ 审核结果异常：" + (data.error || "未知状态");
