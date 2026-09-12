@@ -217,6 +217,34 @@ npm run deploy     # 或 npx wrangler deploy
 
 - `POST /api/chat` 无鉴权，公网任何人可调用并消耗你的 Workers AI 额度；本服务用不到它，建议删除或加鉴权。
 
+## 审核后端：Workers AI / Gemini 可切换（分支 `gemini-judge`）
+
+`main` 分支的审核后端是 Workers AI。`gemini-judge` 分支把"模型调用"抽成两个可切换的实现，**默认行为不变**（不设 `JUDGE_PROVIDER` 时走 Workers AI），Gemini 作为实验后端并存：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `JUDGE_PROVIDER` | `workers-ai`（默认）或 `gemini` |
+| `GEMINI_API_KEY` | Secret，`provider=gemini` 时必填：`wrangler secret put GEMINI_API_KEY` |
+| `GEMINI_MODEL` | 模型 ID，如 `gemini-2.5-flash`（走 URL 路径，需与官方模型名一致） |
+| `GEMINI_TIMEOUT_MS` | 可选，1000–60000，默认 12000 |
+| `GEMINI_THINKING_BUDGET` | 可选，Gemini 2.5 系列的思考预算（`0` = 关闭思考）；留空则不下发该字段，避免不支持它的模型直接 400 |
+
+两个后端共用 `src/prompt.ts` 的提示词和 `src/verdict.ts` 的输出契约，因此可以对同一批帖子做 A/B 对比。Gemini 调用为 `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`，密钥走 `x-goog-api-key` 头，参数 `temperature: 0` + `responseMimeType: application/json`；出站地址在发请求前经过白名单与内网/环回/保留地址校验（`src/net.ts`）。
+
+失败语义与 Workers AI 版完全一致：上游非 2xx、超时、模型输出非 JSON、`verdict` 非法 → 一律 `502 {"status":"error",...}`，由调用方重试，**绝不静默放行**。
+
+### 部署成独立实验 Worker
+
+实验部署用单独的配置文件（Worker 名 `forum-ai-gemini`），不会覆盖线上的 `forum-ai`：
+
+```bash
+npx wrangler deploy -c wrangler.gemini.jsonc
+printf '%s' '<gemini-key>' | npx wrangler secret put GEMINI_API_KEY -c wrangler.gemini.jsonc
+printf '%s' '<judge-key>' | npx wrangler secret put JUDGE_KEY -c wrangler.gemini.jsonc
+```
+
+本地调试可把 `.dev.vars.example` 复制成 `.dev.vars`（已被 gitignore，切勿提交真实密钥）。
+
 ## Resources
 
 - [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)

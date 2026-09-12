@@ -1,0 +1,33 @@
+/**
+ * 实验配置：把审核后端换成 Gemini（Workers AI 版配置见 wrangler.jsonc）。
+ *
+ * 部署命令（必须带 -c，否则会读默认 wrangler.jsonc 而覆盖线上 forum-ai）：
+ *   npx wrangler deploy -c wrangler.gemini.jsonc
+ *
+ * ⚠️ name 必须是独立 Worker 名，且**永远不要**改成 forum-ai：
+ * 这个实验 Worker 只做测试用，原线上审核服务（forum-ai）不受任何影响。
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "forum-ai-gemini",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-10-08",
+	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	"assets": {
+		"binding": "ASSETS",
+		"directory": "./public"
+	},
+	"observability": {
+		"enabled": true
+	},
+	// 保留 AI binding：实验 Worker 也能切回 workers-ai 做同环境对比（provider=gemini 时不会被调用）
+	"ai": {
+		"binding": "AI"
+	},
+	"upload_source_maps": true,
+	"vars": {
+		"JUDGE_PROVIDER": "gemini",
+		// GEMINI_MODEL 部署前填上具体模型 ID（非密钥，明文即可）
+		"GEMINI_MODEL": ""
+	}
+}
