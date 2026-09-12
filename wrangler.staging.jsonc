@@ -1,0 +1,34 @@
+/**
+ * 测试/预发配置：把带「双路由 + 伪装页」的版本部署成一个独立 Worker，先验证再决定是否替换线上 forum-ai。
+ *
+ * 部署命令（务必带 -c，否则会用默认 wrangler.jsonc 覆盖线上 forum-ai）：
+ *   npx wrangler deploy -c wrangler.staging.jsonc
+ *
+ * 需要的 Secret：JUDGE_KEY（鉴权）、GEMINI_API_KEY（/gemini 路由）、SITE_PASSWORD（/admin 口令闸门）
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "forum-ai-next",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-10-08",
+	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	"assets": {
+		"binding": "ASSETS",
+		"directory": "./public",
+		// Worker 先处理请求（否则静态资源层会先用 index.html 接管 "/"，伪装页与 /admin 都会失效）
+		"run_worker_first": true
+	},
+	"observability": {
+		"enabled": true
+	},
+	"ai": {
+		"binding": "AI"
+	},
+	"upload_source_maps": true,
+	"vars": {
+		// /api/judge 的默认后端；/cfai 与 /gemini 由路径强制，不受此项影响
+		"JUDGE_PROVIDER": "workers-ai",
+		"GEMINI_MODEL": "gemini-2.5-flash",
+		"GEMINI_THINKING_BUDGET": "0"
+	}
+}

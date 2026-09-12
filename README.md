@@ -148,6 +148,25 @@ The default system prompt can be changed by updating the `SYSTEM_PROMPT` constan
 
 The UI styling is contained in the `<style>` section of `public/index.html`. You can modify the CSS variables at the top to quickly change the color scheme.
 
+## 端点与页面
+
+| 路径 | 方法 | 说明 |
+| --- | --- | --- |
+| `/cfai` | POST | 审核：强制走 **Cloudflare Workers AI**（鉴权 `x-judge-key`） |
+| `/gemini` | POST | 审核：强制走 **Gemini**（鉴权 `x-judge-key`） |
+| `/api/judge` | POST | 审核：后端由 `JUDGE_PROVIDER` 决定（默认 `workers-ai`），保留给旧调用方 |
+| `/` | GET | **伪装页**：nginx 默认欢迎页（含 `Server: nginx` 头），用于挡扫描器 |
+| `/admin` | GET | **真实控制台**（模板的聊天/审核演示页，页面内有站点口令闸门） |
+| `/admin/` | GET | 308 跳转到 `/admin`（页面用相对路径加载脚本，避免 `//` 路径解析错误） |
+| `/api/verify-site` | POST | 站点口令校验（控制台闸门用，密码来自 `SITE_PASSWORD`） |
+| `/api/chat` | POST | 模板遗留的流式聊天端点（无鉴权，见「已知事项」） |
+
+两个审核路由共用同一份系统提示词与输出契约（`src/prompt.ts` / `src/verdict.ts`），
+所以调用方只换路径即可切换后端，判定标准与响应格式完全一致。
+
+> `run_worker_first: true` 是必需配置：否则静态资源层会先用 `index.html` 接管 `/`，
+> 伪装页与 `/admin` 都会失效（`wrangler.jsonc` / `wrangler.gemini.jsonc` / `wrangler.staging.jsonc` 均已设置）。
+
 ## CloudForum AI 审核（/api/judge）
 
 本 fork 为中文社区论坛提供帖子内容审核。调用方（论坛后端）与审核服务是**两个独立 Worker**，通过 Cloudflare Queues + service binding 协作：论坛发帖成功 → 投递 `{postId}` 到队列 → 论坛的队列消费者重读帖子 → 携带密钥调用本服务的 `/api/judge` → 按 `verdict` + `confidence` 决定放行 / 转人工复核 / 下架。

@@ -2,9 +2,10 @@
  * LLM Chat Application Template — AI Judge Edition
  *
  * Dual-purpose: general chatbot (streaming) + content judge (JSON-only).
- * The /api/judge endpoint is called by the CloudForum backend (server-to-server,
- * via its Queues consumer); the judge backend is switchable between Workers AI
- * (default) and Gemini via JUDGE_PROVIDER.
+ * The judge endpoints are called by the CloudForum backend (server-to-server,
+ * via its Queues consumer): /cfai → Workers AI, /gemini → Gemini, and the legacy
+ * /api/judge whose backend comes from JUDGE_PROVIDER.
+ * The root path serves a decoy page (nginx default page); the real console is /admin.
  *
  * @license MIT
  */
@@ -13,6 +14,10 @@ import { JudgeConfigError, JudgeOutputError, JudgeUpstreamError } from "./errors
 import { judgeWithWorkersAi, MODEL_ID } from "./workersAi";
 import { judgeWithGemini } from "./gemini";
 import { JudgeVerdict } from "./verdict";
+import { DECOY_HTML, DECOY_HEADERS } from "./decoy";
+
+/** 审核后端：workers-ai = Cloudflare Workers AI；gemini = Gemini */
+type JudgeProvider = "workers-ai" | "gemini";
 
 // Default system prompt for chat
 const CHAT_SYSTEM_PROMPT =
@@ -36,6 +41,7 @@ export default {
 		ctx: ExecutionContext,
 	): Promise<Response> {
 		const url = new URL(request.url);
+		const { pathname } = url;
 
 		// Handle CORS preflight
 		if (request.method === "OPTIONS") {
@@ -48,27 +54,39 @@ export default {
 			});
 		}
 
-		// Handle static assets (frontend)
-		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
-			return env.ASSETS.fetch(request);
+		// 审核端点（POST，服务端到服务端，鉴权 x-judge-key）：
+		//   /cfai      强制 Cloudflare Workers AI —— 论坛后台选「Cloudflare 官方」时调用
+		//   /gemini    强制 Gemini —— 论坛后台选「Gemini」时调用
+		//   /api/judge 后端由 env.JUDGE_PROVIDER 决定（默认 workers-ai），保留给旧调用方
+		if (request.method === "POST") {
+			if (pathname === "/cfai") return handleJudgeRequest(request, env, "workers-ai");
+			if (pathname === "/gemini") return handleJudgeRequest(request, env, "gemini");
+			if (pathname === "/api/judge") return handleJudgeRequest(request, env);
+			// 模板遗留端点（本服务用不到，见 README「已知事项」）
+			if (pathname === "/api/chat") return handleChatRequest(request, env);
+			if (pathname === "/api/verify-site") return handleVerifySite(request, env);
 		}
 
-		// API Routes
-		if (url.pathname === "/api/chat" && request.method === "POST") {
-			return handleChatRequest(request, env);
+		// 页面路由：根路径返回伪装页（假 nginx 默认页），降低被扫描/探测的概率；
+		// 真实控制台移到 /admin（页面内仍有站点口令校验，见 /api/verify-site）。
+		// 注意 1：静态资源层会把 /index.html 重定向到 /，所以这里取资源的规范路径 /
+		// 注意 2：控制台页面用相对路径加载 judge.js / chat.js，若停留在 /admin/ 会解析成
+		//         /admin/judge.js（404），因此带斜杠时统一 308 跳到 /admin
+		if (pathname === "/") {
+			return new Response(DECOY_HTML, { headers: DECOY_HEADERS });
+		}
+		if (pathname === "/admin") {
+			return env.ASSETS.fetch(new Request(new URL("/", url), request));
+		}
+		if (pathname === "/admin/") {
+			return new Response(null, { status: 308, headers: { location: "/admin" } });
 		}
 
-		if (url.pathname === "/api/judge" && request.method === "POST") {
-			return handleJudgeRequest(request, env);
+		// 未匹配的 API 路径 → 404；其余路径 → 静态资源（chat.js / judge.js 等）
+		if (pathname.startsWith("/api/")) {
+			return new Response("Not found", { status: 404 });
 		}
-
-		// 站点访问密码验证
-		if (url.pathname === "/api/verify-site" && request.method === "POST") {
-			return handleVerifySite(request, env);
-		}
-
-		// Handle 404 for unmatched routes
-		return new Response("Not found", { status: 404 });
+		return env.ASSETS.fetch(request);
 	},
 } satisfies ExportedHandler<Env>;
 
@@ -148,13 +166,17 @@ async function handleVerifySite(
  * Handles judge API requests (non-streaming, returns pass/flag JSON per CloudForum spec S6)
  *
  * Called by the CloudForum backend (server-to-server, via Cloudflare Queues consumer):
- * 1. Forum sends {title, content} to /api/judge with header x-judge-key
+ * 1. Forum sends {title, content} with header x-judge-key to /cfai、/gemini 或 /api/judge
  * 2. AI returns {"verdict":"pass|flag","confidence":0-1,"reasons":[...],"summary":"..."}
  * 3. Forum decides whether to publish based on verdict/confidence threshold
+ *
+ * @param providerOverride 路径强制的后端（/cfai → workers-ai、/gemini → gemini）；
+ *   省略时按 env.JUDGE_PROVIDER（默认 workers-ai）
  */
 async function handleJudgeRequest(
 	request: Request,
 	env: Env,
+	providerOverride?: JudgeProvider,
 ): Promise<Response> {
 	const jsonHeaders = (origin: string | null): Record<string, string> => ({
 		"content-type": "application/json",
@@ -190,9 +212,9 @@ async function handleJudgeRequest(
 			);
 		}
 
-		// 审核后端选择：默认 workers-ai —— 不设置 JUDGE_PROVIDER 时行为与既有部署完全一致；
-		// 实验 Worker 用 vars 设为 gemini。两个后端共用提示词与输出契约，可对同一批帖子 A/B 对比
-		const provider = String(env.JUDGE_PROVIDER ?? "workers-ai").trim().toLowerCase();
+		// 审核后端选择：路径强制（/cfai、/gemini）> env.JUDGE_PROVIDER > 默认 workers-ai。
+		// 两个后端共用提示词与输出契约，所以换后端对调用方完全透明、可直接 A/B 对比
+		const provider = providerOverride ?? String(env.JUDGE_PROVIDER ?? "workers-ai").trim().toLowerCase();
 
 		let verdict: JudgeVerdict;
 		try {
