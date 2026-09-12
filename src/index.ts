@@ -8,6 +8,7 @@
  * @license MIT
  */
 import { Env, ChatMessage } from "./types";
+import { DECOY_HTML, DECOY_HEADERS } from "./decoy";
 
 // Model ID for Workers AI model
 const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
@@ -80,8 +81,13 @@ export default {
 			});
 		}
 
+		// 根路径给伪装页（nginx 默认欢迎页）：避免被扫描器一眼认出是 LLM 应用；控制台页面不再对外提供
+		if (url.pathname === "/") {
+			return new Response(DECOY_HTML, { headers: DECOY_HEADERS });
+		}
+
 		// Handle static assets (frontend)
-		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
+		if (!url.pathname.startsWith("/api/")) {
 			return env.ASSETS.fetch(request);
 		}
 
