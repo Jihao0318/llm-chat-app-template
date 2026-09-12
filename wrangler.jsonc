@@ -20,5 +20,12 @@
 	"ai": {
 		"binding": "AI"
 	},
+	"vars": {
+		// /api/judge 的默认后端（路径 /cfai、/gemini 会强制覆盖它）
+		"JUDGE_PROVIDER": "workers-ai",
+		// /gemini 路由用；2.5 系列默认开思考会吃掉输出预算，故关闭
+		"GEMINI_MODEL": "gemini-2.5-flash",
+		"GEMINI_THINKING_BUDGET": "0"
+	},
 	"upload_source_maps": true
 }
