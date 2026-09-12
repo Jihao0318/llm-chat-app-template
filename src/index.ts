@@ -2,53 +2,26 @@
  * LLM Chat Application Template — AI Judge Edition
  *
  * Dual-purpose: general chatbot (streaming) + content judge (JSON-only).
- * The /api/judge endpoint is designed to be called by the CloudForum frontend
- * to review post content before publishing.
+ * The judge endpoints are called by the CloudForum backend (server-to-server,
+ * via its Queues consumer): /cfai → Workers AI, /gemini → Gemini, and the legacy
+ * /api/judge whose backend comes from JUDGE_PROVIDER.
+ * The root path serves a decoy page (nginx default page); the real console is /admin.
  *
  * @license MIT
  */
 import { Env, ChatMessage } from "./types";
+import { JudgeConfigError, JudgeOutputError, JudgeUpstreamError } from "./errors";
+import { judgeWithWorkersAi, MODEL_ID } from "./workersAi";
+import { judgeWithGemini } from "./gemini";
+import { JudgeVerdict } from "./verdict";
+import { DECOY_HTML, DECOY_HEADERS } from "./decoy";
 
-// Model ID for Workers AI model
-const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
+/** 审核后端：workers-ai = Cloudflare Workers AI；gemini = Gemini */
+type JudgeProvider = "workers-ai" | "gemini";
 
 // Default system prompt for chat
 const CHAT_SYSTEM_PROMPT =
 	"You are a helpful, friendly assistant. Provide concise and accurate responses.";
-
-// Strict system prompt for content judge — protocol aligned with CloudForum spec S6:
-// response must be {"verdict":"pass|flag","confidence":0.0-1.0,"reasons":[...],"summary":"..."}
-const SYSTEM_PROMPT = `你是一个中文社区论坛的内容审核员。你的唯一任务是判断帖子中的**纯文本内容**是否违规。你必须严格遵守以下规定，不得自作主张修改、删除或转义任何 Markdown / HTML 语法，也不得对任何嵌入媒体（图片、视频、音频等）的 URL 或代码进行安全校验，所有媒体标签一律视为无害。
-
-【审核核心原则】
-1. 只审核"人类可读的叙述性文字"，不审核任何代码、标签、链接地址、文件路径、数字编号、emoji表情符号。
-2. 对于 Markdown 语法（如 **粗体**、*斜体*、\`代码块\`、[链接文字](url) 等），提取其中的显示文本（用户实际看到的文字）进行审核，包裹符号视为格式装饰，不参与判断。
-3. 图片、视频、音频、嵌入式 video 等标签一律放行，不检查其 src 地址、域名与内容。标签内的 alt/标题文字仅作为普通叙述文字审核，URL 本身绝不作为违规证据。
-4. 代码块内内容视为纯技术文本，跳过不审；数学公式、LaTeX 同样跳过。
-
-【违规类别（reason 取值必须严格取自以下枚举）】
-- illegal：违法/涉政/毒品/赌博
-- porn：色情低俗
-- ads：广告营销（正常分享个人作品或开源项目不算）
-- abuse：人身攻击/辱骂/引战/仇恨言论（含针对群体歧视）
-- fraud：诈骗/刷单/返利/非法贷款等诈骗暗示
-- privacy：隐私泄露（电话/身份证/住址等个人信息）
-- spam：垃圾灌水/刷屏
-
-【审核注意】
-- 正常讨论、中性表达、无明显恶意的不算违规。
-- 对事实性争议话题保持中立，谣言类仅限具有明显误导性的突发信息。
-- 模棱两可时倾向于通过（pass），除非明确恶意。
-
-【审核流程与输出】
-1. 阅读整篇帖子，提取纯文本。
-2. 根据上述标准判断是否违规。
-3. 只输出一个纯 JSON 对象，禁止添加任何前缀、后缀、解释、Markdown 代码块包裹或思考过程。格式如下：
-{"verdict": "pass|flag", "confidence": 0.0-1.0, "reasons": ["类别枚举1", "类别枚举2"], "summary": "一句话说明"}
-- verdict=pass 表示无违规；verdict=flag 表示违规。
-- confidence 为判定置信度（0.0-1.0，违规越明确越高）。
-- reasons 从上述违规类别枚举中选取（无违规时为空数组）。
-- summary 用一句话说明判定依据。`;
 
 /** 审核输入上限（字符）：超过直接 422，避免超长内容烧 token。 */
 const JUDGE_CONTENT_LIMIT = 10_000;
@@ -68,6 +41,7 @@ export default {
 		ctx: ExecutionContext,
 	): Promise<Response> {
 		const url = new URL(request.url);
+		const { pathname } = url;
 
 		// Handle CORS preflight
 		if (request.method === "OPTIONS") {
@@ -80,27 +54,39 @@ export default {
 			});
 		}
 
-		// Handle static assets (frontend)
-		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
-			return env.ASSETS.fetch(request);
+		// 审核端点（POST，服务端到服务端，鉴权 x-judge-key）：
+		//   /cfai      强制 Cloudflare Workers AI —— 论坛后台选「Cloudflare 官方」时调用
+		//   /gemini    强制 Gemini —— 论坛后台选「Gemini」时调用
+		//   /api/judge 后端由 env.JUDGE_PROVIDER 决定（默认 workers-ai），保留给旧调用方
+		if (request.method === "POST") {
+			if (pathname === "/cfai") return handleJudgeRequest(request, env, "workers-ai");
+			if (pathname === "/gemini") return handleJudgeRequest(request, env, "gemini");
+			if (pathname === "/api/judge") return handleJudgeRequest(request, env);
+			// 模板遗留端点（本服务用不到，见 README「已知事项」）
+			if (pathname === "/api/chat") return handleChatRequest(request, env);
+			if (pathname === "/api/verify-site") return handleVerifySite(request, env);
 		}
 
-		// API Routes
-		if (url.pathname === "/api/chat" && request.method === "POST") {
-			return handleChatRequest(request, env);
+		// 页面路由：根路径返回伪装页（假 nginx 默认页），降低被扫描/探测的概率；
+		// 真实控制台移到 /admin（页面内仍有站点口令校验，见 /api/verify-site）。
+		// 注意 1：静态资源层会把 /index.html 重定向到 /，所以这里取资源的规范路径 /
+		// 注意 2：控制台页面用相对路径加载 judge.js / chat.js，若停留在 /admin/ 会解析成
+		//         /admin/judge.js（404），因此带斜杠时统一 308 跳到 /admin
+		if (pathname === "/") {
+			return new Response(DECOY_HTML, { headers: DECOY_HEADERS });
+		}
+		if (pathname === "/admin") {
+			return env.ASSETS.fetch(new Request(new URL("/", url), request));
+		}
+		if (pathname === "/admin/") {
+			return new Response(null, { status: 308, headers: { location: "/admin" } });
 		}
 
-		if (url.pathname === "/api/judge" && request.method === "POST") {
-			return handleJudgeRequest(request, env);
+		// 未匹配的 API 路径 → 404；其余路径 → 静态资源（chat.js / judge.js 等）
+		if (pathname.startsWith("/api/")) {
+			return new Response("Not found", { status: 404 });
 		}
-
-		// 站点访问密码验证
-		if (url.pathname === "/api/verify-site" && request.method === "POST") {
-			return handleVerifySite(request, env);
-		}
-
-		// Handle 404 for unmatched routes
-		return new Response("Not found", { status: 404 });
+		return env.ASSETS.fetch(request);
 	},
 } satisfies ExportedHandler<Env>;
 
@@ -180,13 +166,17 @@ async function handleVerifySite(
  * Handles judge API requests (non-streaming, returns pass/flag JSON per CloudForum spec S6)
  *
  * Called by the CloudForum backend (server-to-server, via Cloudflare Queues consumer):
- * 1. Forum sends {title, content} to /api/judge with header x-judge-key
+ * 1. Forum sends {title, content} with header x-judge-key to /cfai、/gemini 或 /api/judge
  * 2. AI returns {"verdict":"pass|flag","confidence":0-1,"reasons":[...],"summary":"..."}
  * 3. Forum decides whether to publish based on verdict/confidence threshold
+ *
+ * @param providerOverride 路径强制的后端（/cfai → workers-ai、/gemini → gemini）；
+ *   省略时按 env.JUDGE_PROVIDER（默认 workers-ai）
  */
 async function handleJudgeRequest(
 	request: Request,
 	env: Env,
+	providerOverride?: JudgeProvider,
 ): Promise<Response> {
 	const jsonHeaders = (origin: string | null): Record<string, string> => ({
 		"content-type": "application/json",
@@ -222,59 +212,39 @@ async function handleJudgeRequest(
 			);
 		}
 
-		// Call AI with judge system prompt — non-streaming since output is tiny JSON
-		const result = await env.AI.run<typeof MODEL_ID>(MODEL_ID, {
-			messages: [
-				{ role: "system", content: SYSTEM_PROMPT },
-				{ role: "user", content: `【帖子标题】${title || "（无标题）"}\n【帖子正文】${content}` },
-			],
-			max_tokens: 1024,
-			temperature: 0,
-			stream: false,
-		});
+		// 审核后端选择：路径强制（/cfai、/gemini）> env.JUDGE_PROVIDER > 默认 workers-ai。
+		// 两个后端共用提示词与输出契约，所以换后端对调用方完全透明、可直接 A/B 对比
+		const provider = providerOverride ?? String(env.JUDGE_PROVIDER ?? "workers-ai").trim().toLowerCase();
 
-		const rawResponse =
-			typeof result === "object" && result !== null
-				? ((result as { response?: unknown }).response ?? "")
-				: String(result);
-
-		// Strictly parse the AI JSON; parse failure = explicit error (upstream queue retries / circuit-breaks)
-		let parsed: unknown;
+		let verdict: JudgeVerdict;
 		try {
-			parsed = JSON.parse(String(rawResponse).trim());
-		} catch {
-			return new Response(
-				JSON.stringify({ status: "error", error: "AI returned non-JSON response" }),
-				{ status: 502, headers: jsonHeaders(origin) },
-			);
+			if (provider === "gemini") {
+				verdict = await judgeWithGemini(env, title, content);
+			} else if (provider === "workers-ai") {
+				verdict = await judgeWithWorkersAi(env, title, content);
+			} else {
+				throw new JudgeConfigError(
+					`JUDGE_PROVIDER 非法：${provider}（可选 workers-ai | gemini）`,
+				);
+			}
+		} catch (e) {
+			// 已知失败类别 → 502 + 具体原因（调用方按非 2xx 重试，连续失败触发熔断）；
+			// 未预期异常交给外层 catch 统一返回「审核服务异常」
+			if (
+				e instanceof JudgeConfigError ||
+				e instanceof JudgeUpstreamError ||
+				e instanceof JudgeOutputError
+			) {
+				console.error(`judge failed [${provider}]:`, e.message);
+				return new Response(
+					JSON.stringify({ status: "error", error: e.message }),
+					{ status: 502, headers: jsonHeaders(origin) },
+				);
+			}
+			throw e;
 		}
 
-		const verdict = (parsed as { verdict?: unknown })?.verdict;
-		if (verdict !== "pass" && verdict !== "flag") {
-			return new Response(
-				JSON.stringify({ status: "error", error: "AI response missing valid verdict" }),
-				{ status: 502, headers: jsonHeaders(origin) },
-			);
-		}
-
-		const confidence =
-			typeof (parsed as { confidence?: unknown }).confidence === "number"
-				? Math.min(1, Math.max(0, (parsed as { confidence: number }).confidence))
-				: 0.5;
-		const reasons = Array.isArray((parsed as { reasons?: unknown }).reasons)
-			? ((parsed as { reasons: unknown[] }).reasons.filter(
-					(r): r is string => typeof r === "string",
-				)).slice(0, 10)
-			: [];
-		const summary =
-			typeof (parsed as { summary?: unknown }).summary === "string"
-				? (parsed as { summary: string }).summary.slice(0, 200)
-				: "";
-
-		return new Response(
-			JSON.stringify({ verdict, confidence, reasons, summary }),
-			{ headers: jsonHeaders(origin) },
-		);
+		return new Response(JSON.stringify(verdict), { headers: jsonHeaders(origin) });
 	} catch (error) {
 		console.error("Error processing judge request:", error);
 		return new Response(

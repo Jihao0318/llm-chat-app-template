@@ -148,6 +148,25 @@ The default system prompt can be changed by updating the `SYSTEM_PROMPT` constan
 
 The UI styling is contained in the `<style>` section of `public/index.html`. You can modify the CSS variables at the top to quickly change the color scheme.
 
+## 端点与页面
+
+| 路径 | 方法 | 说明 |
+| --- | --- | --- |
+| `/cfai` | POST | 审核：强制走 **Cloudflare Workers AI**（鉴权 `x-judge-key`） |
+| `/gemini` | POST | 审核：强制走 **Gemini**（鉴权 `x-judge-key`） |
+| `/api/judge` | POST | 审核：后端由 `JUDGE_PROVIDER` 决定（默认 `workers-ai`），保留给旧调用方 |
+| `/` | GET | **伪装页**：nginx 默认欢迎页（含 `Server: nginx` 头），用于挡扫描器 |
+| `/admin` | GET | **真实控制台**（模板的聊天/审核演示页，页面内有站点口令闸门） |
+| `/admin/` | GET | 308 跳转到 `/admin`（页面用相对路径加载脚本，避免 `//` 路径解析错误） |
+| `/api/verify-site` | POST | 站点口令校验（控制台闸门用，密码来自 `SITE_PASSWORD`） |
+| `/api/chat` | POST | 模板遗留的流式聊天端点（无鉴权，见「已知事项」） |
+
+两个审核路由共用同一份系统提示词与输出契约（`src/prompt.ts` / `src/verdict.ts`），
+所以调用方只换路径即可切换后端，判定标准与响应格式完全一致。
+
+> `run_worker_first: true` 是必需配置：否则静态资源层会先用 `index.html` 接管 `/`，
+> 伪装页与 `/admin` 都会失效（`wrangler.jsonc` / `wrangler.gemini.jsonc` / `wrangler.staging.jsonc` 均已设置）。
+
 ## CloudForum AI 审核（/api/judge）
 
 本 fork 为中文社区论坛提供帖子内容审核。调用方（论坛后端）与审核服务是**两个独立 Worker**，通过 Cloudflare Queues + service binding 协作：论坛发帖成功 → 投递 `{postId}` 到队列 → 论坛的队列消费者重读帖子 → 携带密钥调用本服务的 `/api/judge` → 按 `verdict` + `confidence` 决定放行 / 转人工复核 / 下架。
@@ -216,6 +235,34 @@ npm run deploy     # 或 npx wrangler deploy
 ### 已知事项
 
 - `POST /api/chat` 无鉴权，公网任何人可调用并消耗你的 Workers AI 额度；本服务用不到它，建议删除或加鉴权。
+
+## 审核后端：Workers AI / Gemini 可切换（分支 `gemini-judge`）
+
+`main` 分支的审核后端是 Workers AI。`gemini-judge` 分支把"模型调用"抽成两个可切换的实现，**默认行为不变**（不设 `JUDGE_PROVIDER` 时走 Workers AI），Gemini 作为实验后端并存：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `JUDGE_PROVIDER` | `workers-ai`（默认）或 `gemini` |
+| `GEMINI_API_KEY` | Secret，`provider=gemini` 时必填：`wrangler secret put GEMINI_API_KEY` |
+| `GEMINI_MODEL` | 模型 ID，如 `gemini-2.5-flash`（走 URL 路径，需与官方模型名一致） |
+| `GEMINI_TIMEOUT_MS` | 可选，1000–60000，默认 12000 |
+| `GEMINI_THINKING_BUDGET` | 可选，Gemini 2.5 系列的思考预算（`0` = 关闭思考）；留空则不下发该字段，避免不支持它的模型直接 400 |
+
+两个后端共用 `src/prompt.ts` 的提示词和 `src/verdict.ts` 的输出契约，因此可以对同一批帖子做 A/B 对比。Gemini 调用为 `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`，密钥走 `x-goog-api-key` 头，参数 `temperature: 0` + `responseMimeType: application/json`；出站地址在发请求前经过白名单与内网/环回/保留地址校验（`src/net.ts`）。
+
+失败语义与 Workers AI 版完全一致：上游非 2xx、超时、模型输出非 JSON、`verdict` 非法 → 一律 `502 {"status":"error",...}`，由调用方重试，**绝不静默放行**。
+
+### 部署成独立实验 Worker
+
+实验部署用单独的配置文件（Worker 名 `forum-ai-gemini`），不会覆盖线上的 `forum-ai`：
+
+```bash
+npx wrangler deploy -c wrangler.gemini.jsonc
+printf '%s' '<gemini-key>' | npx wrangler secret put GEMINI_API_KEY -c wrangler.gemini.jsonc
+printf '%s' '<judge-key>' | npx wrangler secret put JUDGE_KEY -c wrangler.gemini.jsonc
+```
+
+本地调试可把 `.dev.vars.example` 复制成 `.dev.vars`（已被 gitignore，切勿提交真实密钥）。
 
 ## Resources
 
